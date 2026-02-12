@@ -4,9 +4,7 @@
 #include <sstream>
 #include <filesystem>
 
-// Все интересные классы
 static const char* g_Classes[] = {
-    // Base entity
     "C_BaseEntity",
     "CBaseEntity",
     "C_BaseModelEntity",
@@ -18,7 +16,6 @@ static const char* g_Classes[] = {
     "CEntityIdentity",
     "CEntityInstance",
 
-    // Player
     "CBasePlayerController",
     "C_BasePlayerController",
     "C_BasePlayerPawn",
@@ -27,21 +24,17 @@ static const char* g_Classes[] = {
     "CDOTAPlayerController",
     "CDOTA_PlayerController",
 
-    // NPC base
     "C_DOTA_BaseNPC",
     "CDOTA_BaseNPC",
 
-    // Heroes
     "C_DOTA_BaseNPC_Hero",
     "CDOTA_BaseNPC_Hero",
 
-    // Creeps
     "C_DOTA_BaseNPC_Creep",
     "C_DOTA_BaseNPC_Creep_Lane",
     "C_DOTA_BaseNPC_Creep_Neutral",
     "C_DOTA_BaseNPC_Creep_Siege",
 
-    // Buildings
     "C_DOTA_BaseNPC_Tower",
     "C_DOTA_BaseNPC_Building",
     "C_DOTA_BaseNPC_Barracks",
@@ -49,33 +42,27 @@ static const char* g_Classes[] = {
     "CDOTA_BaseNPC_Tower",
     "CDOTA_BaseNPC_Building",
 
-    // Abilities
     "C_DOTABaseAbility",
     "CDOTABaseAbility",
     "C_DOTA_Ability_AttributeBonus",
 
-    // Items
     "C_DOTA_Item",
     "CDOTA_Item",
     "C_DOTA_Item_Physical",
 
-    // Modifiers
     "CDOTA_Buff",
     "CDOTA_Modifier_Lua",
     "CDOTA_ModifierManager",
 
-    // Inventory
     "C_DOTA_UnitInventory",
     "CDOTA_UnitInventory",
 
-    // Game rules
     "C_DOTAGameRules",
     "CDOTAGameRules",
     "C_DOTAGamerules",
     "CDOTAGamerulesProxy",
     "C_DOTAGamerulesProxy",
 
-    // Teams
     "C_DOTATeam",
     "CDOTATeam",
     "C_DOTA_DataRadiant",
@@ -83,13 +70,11 @@ static const char* g_Classes[] = {
     "C_DOTA_DataCustomTeam",
     "C_DOTA_DataSpectator",
 
-    // Units
     "C_DOTA_Unit_Courier",
     "C_DOTA_Unit_Roshan",
     "CDOTA_Unit_Courier",
     "CDOTA_Unit_Roshan",
 
-    // Misc
     "C_DOTA_TempTree",
     "C_DOTA_Item_Rune",
     "C_DOTA_BaseNPC_Projectile",
@@ -102,62 +87,70 @@ static const char* g_Classes[] = {
 
 
 std::string Dumper::ReadTypeName(void* schemaType) {
-    if (!schemaType) return "unknown";
-    __try {
-        const char* n = *reinterpret_cast<const char**>(
-            reinterpret_cast<uintptr_t>(schemaType) + 0x8
-        );
-        if (n && strlen(n) > 0 && strlen(n) < 256)
-            return std::string(n);
-    } __except(EXCEPTION_EXECUTE_HANDLER) {}
+    if (!IsValidPtr(schemaType)) return "unknown";
+
+    const void* namePtr = reinterpret_cast<const void*>(
+        reinterpret_cast<uintptr_t>(schemaType) + 0x8
+    );
+
+    if (!IsValidPtr(namePtr)) return "unknown";
+
+    const char* n = *reinterpret_cast<const char* const*>(namePtr);
+
+    if (IsValidString(n))
+        return std::string(n);
+
     return "unknown";
 }
 
 
 bool Dumper::TryDumpClass(CSchemaSystemTypeScope* scope, const char* name) {
-    __try {
-        auto* binding = scope->FindDeclaredClass(name);
-        if (!binding) return false;
+    if (!scope || !name) return false;
 
-        const char* bname = binding->GetName();
-        if (!bname || strlen(bname) == 0) return false;
+    CSchemaClassBinding* binding = scope->FindDeclaredClass(name);
+    if (!binding) return false;
+    if (!IsValidPtr(binding)) return false;
 
-        int16_t fc = binding->GetFieldCount();
-        auto* fields = binding->GetFields();
-        if (!fields || fc <= 0 || fc > 5000) return false;
+    const char* bname = binding->GetName();
+    if (!IsValidString(bname)) return false;
 
-        DumpClass dc;
-        dc.name   = bname;
-        dc.size   = binding->m_size;
+    int16_t fc = binding->GetFieldCount();
+    if (fc <= 0 || fc > 5000) return false;
 
-        auto* pn = binding->GetParentName();
-        dc.parent = pn ? pn : "";
+    SchemaField_t* fields = binding->GetFields();
+    if (!fields) return false;
 
-        for (int i = 0; i < fc; i++) {
-            __try {
-                if (!fields[i].m_name) continue;
-                size_t len = strlen(fields[i].m_name);
-                if (len == 0 || len > 256) continue;
+    DumpClass dc;
+    dc.name = bname;
+    dc.size = binding->m_size;
 
-                DumpField f;
-                f.name   = fields[i].m_name;
-                f.offset = fields[i].m_offset;
-                f.type   = ReadTypeName(fields[i].m_type);
-                dc.fields.push_back(f);
-            } __except(EXCEPTION_EXECUTE_HANDLER) { continue; }
-        }
+    const char* pn = binding->GetParentName();
+    dc.parent = (pn && IsValidString(pn)) ? pn : "";
 
-        std::sort(dc.fields.begin(), dc.fields.end(),
-            [](const DumpField& a, const DumpField& b){ return a.offset < b.offset; });
+    for (int i = 0; i < fc; i++) {
+        if (!IsValidPtr(&fields[i])) continue;
+        if (!IsValidString(fields[i].m_name)) continue;
 
-        if (!dc.fields.empty()) {
-            m_classes.push_back(dc);
-            printf("  [+] %-45s %3d fields  size=0x%X\n",
-                dc.name.c_str(), (int)dc.fields.size(), dc.size);
-            return true;
-        }
-    } __except(EXCEPTION_EXECUTE_HANDLER) {}
-    return false;
+        DumpField f;
+        f.name   = fields[i].m_name;
+        f.offset = fields[i].m_offset;
+        f.type   = ReadTypeName(fields[i].m_type);
+        dc.fields.push_back(f);
+    }
+
+    std::sort(dc.fields.begin(), dc.fields.end(),
+        [](const DumpField& a, const DumpField& b) {
+            return a.offset < b.offset;
+        });
+
+    if (dc.fields.empty()) return false;
+
+    m_classes.push_back(dc);
+
+    printf("  [+] %-45s %3d fields  size=0x%X\n",
+        dc.name.c_str(), (int)dc.fields.size(), dc.size);
+
+    return true;
 }
 
 
@@ -181,13 +174,18 @@ void Dumper::DumpModule(const char* moduleName) {
     printf("[+] %s: %d classes dumped\n\n", moduleName, found);
 }
 
-
+// ===========================================================
+// Save HPP
+// ===========================================================
 void Dumper::SaveHpp(const std::string& path) {
     auto dir = std::filesystem::path(path).parent_path();
     if (!dir.empty()) std::filesystem::create_directories(dir);
 
     std::ofstream f(path);
-    if (!f.is_open()) { printf("[-] Cannot write %s\n", path.c_str()); return; }
+    if (!f.is_open()) {
+        printf("[-] Cannot write %s\n", path.c_str());
+        return;
+    }
 
     f << "// ==========================================================\n";
     f << "// Dota 2 Offsets — Auto Generated\n";
@@ -198,15 +196,16 @@ void Dumper::SaveHpp(const std::string& path) {
     f << "#include <cstdint>\n\n";
     f << "namespace dota2 {\n\n";
 
-    for (auto& c : m_classes) {
+    for (const auto& c : m_classes) {
         f << "    // ";
         if (!c.parent.empty()) f << "extends " << c.parent << " | ";
         f << "size 0x" << std::hex << std::uppercase << c.size << std::dec << "\n";
         f << "    namespace " << c.name << " {\n";
 
-        for (auto& fld : c.fields) {
+        for (const auto& fld : c.fields) {
             std::string padded = fld.name;
             if (padded.size() < 48) padded.resize(48, ' ');
+
             f << "        constexpr uint32_t " << padded
               << "= 0x" << std::hex << std::uppercase
               << std::setw(4) << std::setfill('0') << fld.offset
@@ -227,7 +226,10 @@ void Dumper::SaveJson(const std::string& path) {
     if (!dir.empty()) std::filesystem::create_directories(dir);
 
     std::ofstream f(path);
-    if (!f.is_open()) { printf("[-] Cannot write %s\n", path.c_str()); return; }
+    if (!f.is_open()) {
+        printf("[-] Cannot write %s\n", path.c_str());
+        return;
+    }
 
     f << "{\n";
     f << "  \"timestamp\": \"" << __DATE__ << " " << __TIME__ << "\",\n";
@@ -235,14 +237,14 @@ void Dumper::SaveJson(const std::string& path) {
     f << "  \"classes\": {\n";
 
     for (size_t ci = 0; ci < m_classes.size(); ci++) {
-        auto& c = m_classes[ci];
+        const auto& c = m_classes[ci];
         f << "    \"" << c.name << "\": {\n";
         f << "      \"parent\": \"" << c.parent << "\",\n";
         f << "      \"size\": " << c.size << ",\n";
         f << "      \"fields\": {\n";
 
         for (size_t fi = 0; fi < c.fields.size(); fi++) {
-            auto& fld = c.fields[fi];
+            const auto& fld = c.fields[fi];
             f << "        \"" << fld.name << "\": { "
               << "\"offset\": " << fld.offset << ", "
               << "\"type\": \"" << fld.type << "\" }";
