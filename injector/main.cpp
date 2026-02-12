@@ -1,12 +1,9 @@
-#define WIN32_LEAN_AND_MEAN
 #include <Windows.h>
 #include <TlHelp32.h>
 #include <Psapi.h>
 #include <cstdio>
 #include <string>
 #include <filesystem>
-
-// Цвета консольки
 
 static void Color(WORD c) { SetConsoleTextAttribute(GetStdHandle(STD_OUTPUT_HANDLE), c); }
 static void Green()  { Color(10); }
@@ -16,15 +13,12 @@ static void Cyan()   { Color(11); }
 static void White()  { Color(15); }
 static void Reset()  { Color(7);  }
 
-
-// Поиск процесса по имени
-
-
 static DWORD FindPID(const char* name) {
     HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
     if (snap == INVALID_HANDLE_VALUE) return 0;
 
-    PROCESSENTRY32 pe{}; pe.dwSize = sizeof(pe);
+    PROCESSENTRY32 pe{};
+    pe.dwSize = sizeof(pe);
     DWORD pid = 0;
 
     if (Process32First(snap, &pe)) {
@@ -40,13 +34,12 @@ static DWORD FindPID(const char* name) {
     return pid;
 }
 
-
-// Проверка модуля
 static bool HasModule(DWORD pid, const char* name) {
     HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, pid);
     if (snap == INVALID_HANDLE_VALUE) return false;
 
-    MODULEENTRY32 me{}; me.dwSize = sizeof(me);
+    MODULEENTRY32 me{};
+    me.dwSize = sizeof(me);
     bool found = false;
 
     if (Module32First(snap, &me)) {
@@ -59,8 +52,6 @@ static bool HasModule(DWORD pid, const char* name) {
     return found;
 }
 
-
-// Инжектт используя LoadLibraryA
 static bool Inject(DWORD pid, const char* dllPath) {
     char full[MAX_PATH];
     GetFullPathNameA(dllPath, MAX_PATH, full, nullptr);
@@ -104,8 +95,6 @@ static bool Inject(DWORD pid, const char* dllPath) {
     return true;
 }
 
-
-// Осн
 int main(int argc, char* argv[]) {
     SetConsoleTitleA("Dota 2 Dumper — Injector");
 
@@ -116,7 +105,6 @@ int main(int argc, char* argv[]) {
     printf("==============================================\n\n");
     Reset();
 
-    // Ищем дллку
     std::string dll;
     if (argc > 1) {
         dll = argv[1];
@@ -129,13 +117,12 @@ int main(int argc, char* argv[]) {
     White(); printf("[*] DLL: %s\n", dll.c_str()); Reset();
 
     if (!std::filesystem::exists(dll)) {
-        Red();   printf("[-] File not found!\n");
+        Red();    printf("[-] File not found!\n");
         Yellow(); printf("[*] Put dumper.dll next to injector.exe\n"); Reset();
         printf("\nENTER to exit..."); getchar();
         return 1;
     }
 
-    // Ждем дотку
     Yellow(); printf("[*] Waiting for dota2.exe ...\n"); Reset();
 
     DWORD pid = 0;
@@ -143,7 +130,6 @@ int main(int argc, char* argv[]) {
 
     Green(); printf("[+] dota2.exe PID = %u\n", pid); Reset();
 
-    // Теперь модули
     Yellow(); printf("[*] Waiting for game modules...\n"); Reset();
 
     const char* need[] = { "client.dll", "engine2.dll", "schemasystem.dll" };
@@ -164,7 +150,6 @@ int main(int argc, char* argv[]) {
     Yellow(); printf("[*] Extra wait 5 s...\n"); Reset();
     Sleep(5000);
 
-    // сам инжект
     Cyan(); printf("[*] Injecting...\n"); Reset();
 
     if (Inject(pid, dll.c_str())) {
