@@ -12,4 +12,6 @@ target_compile_definitions(dumper PRIVATE
     _CRT_SECURE_NO_WARNINGS
 )
 
+target_compile_options(dumper PRIVATE /EHa)
+
 target_link_libraries(dumper PRIVATE psapi)
