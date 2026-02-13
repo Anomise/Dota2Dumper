@@ -66,8 +66,6 @@ static void MainThread(HMODULE hSelf) {
 
     if (!SchemaInit()) {
         printf("\n[-] Schema init failed.\n");
-        printf("    This means the Schema System interface or\n");
-        printf("    vfunc layout has changed in this Dota 2 build.\n");
         goto done;
     }
 
@@ -84,11 +82,11 @@ static void MainThread(HMODULE hSelf) {
         if (d.ClassCount() == 0) {
             printf("\n[-] No classes found.\n");
         } else {
-            d.SaveHpp(std::string(OUT_DIR) + "\\offsets.hpp");
-            d.SaveJson(std::string(OUT_DIR) + "\\offsets.json");
+            d.SaveHpp(OUT_DIR "\\offsets.hpp");
+            d.SaveJson(OUT_DIR "\\offsets.json");
 
             printf("\n==============================================\n");
-            printf("  DONE — %zu classes dumped\n", d.ClassCount());
+            printf("  DONE - %zu classes dumped\n", d.ClassCount());
             printf("  Output: %s\n", OUT_DIR);
             printf("==============================================\n");
         }
