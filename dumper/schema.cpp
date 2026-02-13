@@ -36,9 +36,16 @@ static void DumpHex(const char* label, void* addr, int size) {
     printf("\n");
 }
 
+static const char* ReadAsciiStr(const void* base, int offset) {
+    const char* s = SEH_ReadStr(base, offset);
+    if (!s) return nullptr;
+    if (!SEH_IsAsciiString(s, 256)) return nullptr;
+    return s;
+}
+
 static bool CheckNameInResult(void* r, const char* className, int* outNameOff, int* outIndirectOff) {
     for (int no = 0x00; no <= 0x100; no += 0x08) {
-        const char* name = SEH_ReadStr(r, no);
+        const char* name = ReadAsciiStr(r, no);
         if (name && strcmp(name, className) == 0) {
             *outNameOff = no;
             *outIndirectOff = -1;
@@ -51,7 +58,7 @@ static bool CheckNameInResult(void* r, const char* className, int* outNameOff, i
         if (!inner || inner == r) continue;
         if (!SEH_IsReadable(inner, 0x40)) continue;
         for (int no = 0x00; no <= 0x80; no += 0x08) {
-            const char* name = SEH_ReadStr(inner, no);
+            const char* name = ReadAsciiStr(inner, no);
             if (name && strcmp(name, className) == 0) {
                 *outNameOff = no;
                 *outIndirectOff = off;
@@ -89,73 +96,159 @@ static void* TryFindClass(void* scope, int idx, const char* cls, int nargs) {
     return nullptr;
 }
 
+static int CountValidAsciiFields(void* fieldsPtr, int fieldCount, int fieldStride) {
+    int valid = 0;
+    for (int i = 0; i < fieldCount && i < 50; i++) {
+        void* fieldAddr = (void*)((uintptr_t)fieldsPtr + i * fieldStride);
+        if (!SEH_IsReadable(fieldAddr, fieldStride)) break;
+
+        const char* fn = ReadAsciiStr(fieldAddr, 0x00);
+        if (!fn) continue;
+
+        int32_t foff = 0;
+        if (!SEH_ReadI32(fieldAddr, 0x10, &foff)) continue;
+        if (foff < 0 || foff > 0x100000) continue;
+
+        valid++;
+    }
+    return valid;
+}
+
+static bool TryBindingLayout(void* binding, const char* testClass, int nameOffset) {
+    static const int strides[] = { 0x20, 0x28, 0x30, 0x18, 0x38, 0x40 };
+
+    for (int fcOff = 0x10; fcOff <= 0x50; fcOff += 0x02) {
+        int16_t fc = 0;
+        if (!SEH_ReadI16(binding, fcOff, &fc)) continue;
+        if (fc <= 0 || fc > 500) continue;
+
+        for (int fOff = ((fcOff + 6) & ~7); fOff <= 0x78; fOff += 0x08) {
+            void* fieldsPtr = nullptr;
+            if (!SEH_ReadPtr(binding, fOff, &fieldsPtr)) continue;
+            if (!fieldsPtr) continue;
+            if (!SEH_IsReadable(fieldsPtr, 0x20)) continue;
+
+            for (int si = 0; si < 6; si++) {
+                int stride = strides[si];
+                int validCount = CountValidAsciiFields(fieldsPtr, fc, stride);
+
+                if (validCount >= 3 && validCount >= fc / 2) {
+                    g_BindingLayout.name_offset = nameOffset;
+                    g_BindingLayout.field_count_offset = fcOff;
+                    g_BindingLayout.fields_offset = fOff;
+
+                    printf("    field_count offset = 0x%X (count=%d)\n", fcOff, fc);
+                    printf("    fields offset      = 0x%X\n", fOff);
+                    printf("    field stride       = 0x%X\n", stride);
+                    printf("    valid fields       = %d / %d\n", validCount, fc);
+
+                    void* f0 = (void*)((uintptr_t)fieldsPtr);
+                    const char* fn0 = ReadAsciiStr(f0, 0x00);
+                    int32_t fo0 = 0;
+                    SEH_ReadI32(f0, 0x10, &fo0);
+                    if (fn0) printf("    first field: \"%s\" @ 0x%X\n", fn0, fo0);
+
+                    g_BindingLayout.size_offset = -1;
+                    for (int sOff = nameOffset + 0x08; sOff <= 0x40; sOff += 0x04) {
+                        if (sOff == fcOff) continue;
+                        int32_t sz = 0;
+                        if (!SEH_ReadI32(binding, sOff, &sz)) continue;
+                        if (sz > 0 && sz < 0x100000) {
+                            g_BindingLayout.size_offset = sOff;
+                            printf("    size offset        = 0x%X (size=0x%X)\n", sOff, sz);
+                            break;
+                        }
+                    }
+
+                    g_BindingLayout.parent_offset = -1;
+                    for (int pOff = 0x00; pOff <= 0x40; pOff += 0x08) {
+                        if (pOff == nameOffset) continue;
+                        if (pOff == fOff) continue;
+                        void* pp = nullptr;
+                        if (!SEH_ReadPtr(binding, pOff, &pp)) continue;
+                        if (!pp || pp == binding) continue;
+                        if (!SEH_IsReadable(pp, 0x20)) continue;
+                        const char* pname = ReadAsciiStr(pp, nameOffset);
+                        if (pname) {
+                            g_BindingLayout.parent_offset = pOff;
+                            printf("    parent offset      = 0x%X (%s)\n", pOff, pname);
+                            break;
+                        }
+                    }
+
+                    g_BindingLayout.detected = true;
+                    return true;
+                }
+            }
+        }
+    }
+
+    return false;
+}
+
 struct ScopeCandidate {
-    int scopeVFunc;
-    const char* moduleName;
+    int vfunc;
+    const char* module;
     void* scope;
 };
 
 static bool DetectAll(void* schema) {
-    printf("[*] Phase 1: Finding all valid TypeScopes...\n\n");
+    printf("[*] Phase 1: Finding TypeScopes...\n\n");
 
     const char* tryModules[] = {
         "client.dll", "!GlobalTypes", "server.dll", "engine2.dll",
         "client", "server", "schemasystem.dll",
         "worldrenderer.dll", "particles.dll",
+        "animationsystem.dll", "pulse_system.dll",
+        "materialsystem2.dll",
         nullptr
     };
 
-    ScopeCandidate candidates[64];
+    ScopeCandidate candidates[128];
     int numCandidates = 0;
 
-    for (int idx = 8; idx <= 30; idx++) {
-        for (int mn = 0; tryModules[mn] && numCandidates < 64; mn++) {
+    for (int idx = 8; idx <= 35; idx++) {
+        for (int mn = 0; tryModules[mn] && numCandidates < 128; mn++) {
             void* scope = TryGetScope(schema, idx, tryModules[mn]);
             if (!scope) continue;
 
-            bool duplicate = false;
+            bool dup = false;
             for (int c = 0; c < numCandidates; c++) {
-                if (candidates[c].scope == scope && candidates[c].scopeVFunc == idx) {
-                    duplicate = true;
+                if (candidates[c].scope == scope && candidates[c].vfunc == idx) {
+                    dup = true;
                     break;
                 }
             }
-            if (duplicate) continue;
+            if (dup) continue;
 
-            candidates[numCandidates].scopeVFunc = idx;
-            candidates[numCandidates].moduleName = tryModules[mn];
+            candidates[numCandidates].vfunc = idx;
+            candidates[numCandidates].module = tryModules[mn];
             candidates[numCandidates].scope = scope;
             numCandidates++;
 
-            const char* sn = (const char*)((uintptr_t)scope + 0x08);
-            bool hasName = SEH_IsReadable((void*)sn, 16) && SEH_ValidateString(sn, 128);
-            printf("    vfunc %2d + \"%s\" -> 0x%p", idx, tryModules[mn], scope);
-            if (hasName) printf(" (name: %.32s)", sn);
-            printf("\n");
+            printf("    vfunc %2d + %-20s -> 0x%p\n", idx, tryModules[mn], scope);
         }
     }
 
-    printf("\n    Total scope candidates: %d\n\n", numCandidates);
+    printf("\n    Candidates: %d\n\n", numCandidates);
 
     if (numCandidates == 0) {
-        printf("[-] No scope candidates found\n");
+        printf("[-] No scope candidates\n");
         return false;
     }
 
-    printf("[*] Phase 2: Finding FindDeclaredClass that works...\n\n");
+    printf("[*] Phase 2: Finding class lookup...\n\n");
 
     const char* testClasses[] = {
         "C_BaseEntity", "CBaseEntity",
-        "CEntityInstance", "C_DOTA_BaseNPC",
-        "CDOTA_BaseNPC", "CGameSceneNode",
-        "C_BaseModelEntity",
+        "CEntityInstance", "CGameSceneNode",
+        "C_DOTA_BaseNPC", "CDOTA_BaseNPC",
+        "C_BaseModelEntity", "CBaseModelEntity",
         nullptr
     };
 
     for (int ci = 0; ci < numCandidates; ci++) {
         void* scope = candidates[ci].scope;
-        int scopeVFunc = candidates[ci].scopeVFunc;
-        const char* modName = candidates[ci].moduleName;
 
         for (int classIdx = 1; classIdx <= 40; classIdx++) {
             for (int tc = 0; testClasses[tc]; tc++) {
@@ -168,188 +261,94 @@ static bool DetectAll(void* schema) {
                     if (!CheckNameInResult(r, testClasses[tc], &nameOff, &indirectOff))
                         continue;
 
-                    printf("    [+] FOUND WORKING COMBINATION:\n");
-                    printf("        Scope vfunc:  %d\n", scopeVFunc);
-                    printf("        Scope module: %s\n", modName);
-                    printf("        Scope ptr:    0x%p\n", scope);
-                    printf("        Class vfunc:  %d (%d args)\n", classIdx, nargs);
-                    printf("        Test class:   %s\n", testClasses[tc]);
-                    printf("        Result ptr:   0x%p\n", r);
-                    printf("        Name offset:  0x%X\n", nameOff);
-                    if (indirectOff >= 0)
-                        printf("        Indirect off: 0x%X\n", indirectOff);
-                    printf("\n");
+                    void* binding = r;
+                    if (indirectOff >= 0) {
+                        void* inner = nullptr;
+                        if (!SEH_ReadPtr(r, indirectOff, &inner)) continue;
+                        if (!inner || !SEH_IsReadable(inner, 0x60)) continue;
+                        binding = inner;
+                    }
 
-                    g_VFuncIdx.findTypeScopeForModule = scopeVFunc;
+                    if (!TryBindingLayout(binding, testClasses[tc], nameOff))
+                        continue;
+
+                    g_VFuncIdx.findTypeScopeForModule = candidates[ci].vfunc;
                     g_VFuncIdx.findDeclaredClass = classIdx;
                     g_VFuncIdx.findDeclaredClassNArgs = nargs;
                     g_VFuncIdx.classNameOffset = nameOff;
                     g_VFuncIdx.classInfoPtrOffset = indirectOff;
                     g_VFuncIdx.detected = true;
 
+                    printf("\n    [+] WORKING COMBINATION:\n");
+                    printf("        Scope:  vfunc %d, module '%s'\n",
+                        candidates[ci].vfunc, candidates[ci].module);
+                    printf("        Class:  vfunc %d, %d args\n", classIdx, nargs);
+                    printf("        Test:   %s\n", testClasses[tc]);
+                    printf("        Name@:  0x%X\n", nameOff);
+                    if (indirectOff >= 0)
+                        printf("        Indir@: 0x%X\n", indirectOff);
+
                     int confirmed = 0;
                     for (int v = 0; testClasses[v]; v++) {
                         void* check = TryFindClass(scope, classIdx, testClasses[v], nargs);
-                        if (check) {
-                            int tmpName = -1, tmpInd = -1;
-                            if (CheckNameInResult(check, testClasses[v], &tmpName, &tmpInd))
-                                confirmed++;
-                        }
+                        if (!check) continue;
+                        int tn = -1, ti = -1;
+                        if (CheckNameInResult(check, testClasses[v], &tn, &ti))
+                            confirmed++;
                     }
-                    printf("        Confirmed %d/%d test classes\n\n", confirmed, 7);
+                    printf("        Confirmed: %d / 8\n\n", confirmed);
 
                     if (confirmed >= 2) return true;
 
                     g_VFuncIdx.detected = false;
+                    g_BindingLayout.detected = false;
                 }
             }
         }
     }
 
     printf("[-] No working combination found\n\n");
-    printf("[*] Phase 3: Diagnostic dump...\n\n");
+    printf("[*] Diagnostic: showing all non-null class lookups...\n\n");
 
-    for (int ci = 0; ci < numCandidates && ci < 3; ci++) {
+    for (int ci = 0; ci < numCandidates && ci < 5; ci++) {
         void* scope = candidates[ci].scope;
-        printf("    Scope candidate %d (vfunc %d, %s):\n",
-            ci, candidates[ci].scopeVFunc, candidates[ci].moduleName);
-        DumpHex("      Scope", scope, 96);
+        printf("  Scope %d (vfunc %d, %s, 0x%p):\n",
+            ci, candidates[ci].vfunc, candidates[ci].module, scope);
+        DumpHex("    scope", scope, 64);
 
-        for (int classIdx = 1; classIdx <= 20; classIdx++) {
-            void* r1 = TryFindClass(scope, classIdx, "C_BaseEntity", 1);
-            void* r2 = TryFindClass(scope, classIdx, "C_BaseEntity", 2);
-            if (r1) {
-                printf("      vfunc %d (1 arg) -> 0x%p\n", classIdx, r1);
-                DumpHex("        ", r1, 64);
+        int shown = 0;
+        for (int idx = 1; idx <= 30 && shown < 5; idx++) {
+            void* r = TryFindClass(scope, idx, "C_BaseEntity", 1);
+            if (!r) r = TryFindClass(scope, idx, "C_BaseEntity", 2);
+            if (!r) continue;
+            printf("    vfunc %d -> 0x%p\n", idx, r);
+            DumpHex("      result", r, 80);
+
+            for (int off = 0; off <= 0x40; off += 0x08) {
+                void* inner = nullptr;
+                if (SEH_ReadPtr(r, off, &inner) && inner && inner != r &&
+                    SEH_IsReadable(inner, 0x40)) {
+                    for (int no = 0; no <= 0x40; no += 0x08) {
+                        const char* s = ReadAsciiStr(inner, no);
+                        if (s) {
+                            printf("      [off=0x%X -> inner 0x%p, str@0x%X = \"%s\"]\n",
+                                off, inner, no, s);
+                        }
+                    }
+                }
             }
-            if (r2 && r2 != r1) {
-                printf("      vfunc %d (2 args) -> 0x%p\n", classIdx, r2);
-                DumpHex("        ", r2, 64);
+
+            for (int no = 0; no <= 0x60; no += 0x08) {
+                const char* s = ReadAsciiStr(r, no);
+                if (s) printf("      [direct str@0x%X = \"%s\"]\n", no, s);
             }
+
+            shown++;
         }
         printf("\n");
     }
 
     return false;
-}
-
-static bool DetectBindingLayout(void* scope, const char* testClass) {
-    printf("[*] Detecting binding layout using '%s'...\n", testClass);
-
-    void* raw = nullptr;
-    if (g_VFuncIdx.findDeclaredClassNArgs == 2)
-        raw = SEH_VCall2(scope, g_VFuncIdx.findDeclaredClass, testClass, nullptr);
-    else
-        raw = SEH_VCall1(scope, g_VFuncIdx.findDeclaredClass, testClass);
-
-    if (!raw || !SEH_IsReadable(raw, 0x60)) {
-        printf("    [-] Raw result not readable\n");
-        return false;
-    }
-
-    void* binding = raw;
-    if (g_VFuncIdx.classInfoPtrOffset >= 0) {
-        void* inner = nullptr;
-        if (!SEH_ReadPtr(raw, g_VFuncIdx.classInfoPtrOffset, &inner)) return false;
-        if (!inner || !SEH_IsReadable(inner, 0x60)) return false;
-        binding = inner;
-        printf("    Indirect binding @ 0x%p\n", binding);
-    }
-
-    DumpHex("Binding", binding, 96);
-
-    int nameOffset = g_VFuncIdx.classNameOffset;
-
-    const char* verifyName = SEH_ReadStr(binding, nameOffset);
-    if (!verifyName || strcmp(verifyName, testClass) != 0) {
-        printf("    Name mismatch at 0x%X, searching...\n", nameOffset);
-        bool found = false;
-        for (int no = 0x00; no <= 0x80; no += 0x08) {
-            const char* n = SEH_ReadStr(binding, no);
-            if (n && strcmp(n, testClass) == 0) {
-                nameOffset = no;
-                printf("    Found name at 0x%X\n", nameOffset);
-                found = true;
-                break;
-            }
-        }
-        if (!found) {
-            printf("    [-] Cannot find name in binding\n");
-            return false;
-        }
-    }
-
-    printf("    name offset = 0x%X\n", nameOffset);
-    g_BindingLayout.name_offset = nameOffset;
-
-    bool foundFields = false;
-
-    for (int fcOff = 0x10; fcOff <= 0x50; fcOff += 0x02) {
-        int16_t fc = 0;
-        if (!SEH_ReadI16(binding, fcOff, &fc)) continue;
-        if (fc <= 0 || fc > 500) continue;
-
-        for (int fOff = ((fcOff + 6) & ~7); fOff <= 0x70; fOff += 0x08) {
-            void* fieldsPtr = nullptr;
-            if (!SEH_ReadPtr(binding, fOff, &fieldsPtr)) continue;
-            if (!fieldsPtr) continue;
-            if (!SEH_IsReadable(fieldsPtr, (int)sizeof(SchemaField_t))) continue;
-
-            const char* firstName = SEH_ReadStr(fieldsPtr, 0x00);
-            if (!firstName) continue;
-
-            int32_t firstOffset = 0;
-            if (!SEH_ReadI32(fieldsPtr, 0x10, &firstOffset)) continue;
-            if (firstOffset < 0 || firstOffset > 0x100000) continue;
-
-            g_BindingLayout.field_count_offset = fcOff;
-            g_BindingLayout.fields_offset = fOff;
-            printf("    field_count offset = 0x%X (count=%d)\n", fcOff, fc);
-            printf("    fields offset      = 0x%X\n", fOff);
-            printf("    first field: \"%s\" @ 0x%X\n", firstName, firstOffset);
-            foundFields = true;
-            goto done_fields;
-        }
-    }
-
-done_fields:
-    if (!foundFields) {
-        printf("    [-] Could not find fields\n");
-        return false;
-    }
-
-    g_BindingLayout.size_offset = -1;
-    for (int sOff = nameOffset + 0x08; sOff <= 0x40; sOff += 0x04) {
-        if (sOff == g_BindingLayout.field_count_offset) continue;
-        int32_t sz = 0;
-        if (!SEH_ReadI32(binding, sOff, &sz)) continue;
-        if (sz > 0 && sz < 0x100000) {
-            g_BindingLayout.size_offset = sOff;
-            printf("    size offset        = 0x%X (size=0x%X)\n", sOff, sz);
-            break;
-        }
-    }
-
-    g_BindingLayout.parent_offset = -1;
-    for (int pOff = 0x00; pOff <= 0x40; pOff += 0x08) {
-        if (pOff == nameOffset) continue;
-        if (pOff == g_BindingLayout.fields_offset) continue;
-        void* parentPtr = nullptr;
-        if (!SEH_ReadPtr(binding, pOff, &parentPtr)) continue;
-        if (!parentPtr) continue;
-        if (parentPtr == binding) continue;
-        if (!SEH_IsReadable(parentPtr, 0x20)) continue;
-        const char* parentName = SEH_ReadStr(parentPtr, nameOffset);
-        if (parentName && SEH_ValidateString(parentName, 256)) {
-            g_BindingLayout.parent_offset = pOff;
-            printf("    parent offset      = 0x%X (parent=%s)\n", pOff, parentName);
-            break;
-        }
-    }
-
-    g_BindingLayout.detected = true;
-    printf("[+] Layout detected!\n\n");
-    return true;
 }
 
 void* Schema_FindTypeScope(const char* moduleName) {
@@ -384,36 +383,12 @@ bool SchemaInit() {
     printf("[+] SchemaSystem @ 0x%p\n\n", g_pSchema);
 
     if (!DetectAll(g_pSchema)) {
-        printf("\n[-] Could not find working Schema System combination.\n");
-        printf("[-] This Dota 2 build may have changed the interface.\n");
+        printf("\n[-] Schema detection failed.\n");
+        printf("[-] This build may have changed the Schema System interface.\n");
+        printf("[-] Check diagnostic output above.\n");
         return false;
     }
 
-    void* workingScope = Schema_FindTypeScope("client.dll");
-    if (!workingScope) workingScope = Schema_FindTypeScope("!GlobalTypes");
-    if (!workingScope) {
-        printf("[-] Cannot get working scope after detection\n");
-        return false;
-    }
-
-    printf("[+] Working scope @ 0x%p\n\n", workingScope);
-
-    const char* layoutClasses[] = {
-        "C_BaseEntity", "CBaseEntity", "CEntityInstance",
-        "CGameSceneNode", "C_BaseModelEntity",
-        "C_DOTA_BaseNPC", "CDOTA_BaseNPC",
-        nullptr
-    };
-
-    for (int i = 0; layoutClasses[i]; i++) {
-        if (DetectBindingLayout(workingScope, layoutClasses[i]))
-            break;
-    }
-
-    if (!g_BindingLayout.detected) {
-        printf("[-] Could not detect binding layout\n");
-        return false;
-    }
-
+    printf("[+] Schema system fully detected!\n\n");
     return true;
 }
