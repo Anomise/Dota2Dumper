@@ -2,7 +2,6 @@
 #include "schema.hpp"
 #include <string>
 #include <vector>
-#include <fstream>
 
 struct DumpField {
     std::string name;
@@ -26,7 +25,5 @@ public:
 
 private:
     std::vector<DumpClass> m_classes;
-
-    bool TryDumpClass(CSchemaSystemTypeScope* scope, const char* name);
-    std::string ReadTypeName(void* schemaType);
+    bool TryDumpClass(void* scope, const char* name);
 };
