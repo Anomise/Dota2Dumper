@@ -19,8 +19,8 @@ struct DumpClass {
 class Dumper {
 public:
     void DumpModule(const char* moduleName);
-    void SaveHpp(const std::string& path);
-    void SaveJson(const std::string& path);
+    void SaveHpp(const char* path);
+    void SaveJson(const char* path);
     size_t ClassCount() const { return m_classes.size(); }
 
 private:
