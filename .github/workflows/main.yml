@@ -19,46 +19,33 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup CMake
-        uses: lukka/get-cmake@latest
-
       - name: Configure
         run: cmake -B build -G "Visual Studio 17 2022" -A x64 -DCMAKE_BUILD_TYPE=Release
 
       - name: Build
         run: cmake --build build --config Release --parallel
 
-      - name: Collect binaries
+      - name: Collect
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path artifact
-          
-          $exeFiles = Get-ChildItem -Path build -Recurse -Filter "injector.exe"
-          $dllFiles = Get-ChildItem -Path build -Recurse -Filter "dumper.dll"
-          
-          foreach ($f in $exeFiles) {
-            Write-Host "Found: $($f.FullName)"
-            Copy-Item $f.FullName -Destination artifact/
-          }
-          foreach ($f in $dllFiles) {
-            Write-Host "Found: $($f.FullName)"
-            Copy-Item $f.FullName -Destination artifact/
-          }
-          
+          Get-ChildItem -Path build -Recurse -Include "injector.exe","dumper.dll" |
+            ForEach-Object {
+              Write-Host "Found: $($_.FullName)"
+              Copy-Item $_.FullName -Destination artifact/
+            }
           Get-ChildItem artifact/
 
-      - name: Upload artifact
+      - name: Upload
         uses: actions/upload-artifact@v4
         with:
           name: dota2-dumper
           path: artifact/
           retention-days: 90
 
-      - name: Create Release
+      - name: Release
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          files: |
-            artifact/injector.exe
-            artifact/dumper.dll
+          files: artifact/*
           generate_release_notes: true
