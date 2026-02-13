@@ -1,6 +1,6 @@
 #include <Windows.h>
 #include <cstdio>
-#include <thread>
+#include <string>
 #include <filesystem>
 
 #include "schema.hpp"
@@ -50,22 +50,24 @@ static void MainThread(HMODULE hSelf) {
     freopen_s(&ci, "CONIN$",  "r", stdin);
 
     printf("==============================================\n");
-    printf("  Dota 2 Schema Dumper\n");
+    printf("  Dota 2 Schema Dumper (Safe Mode)\n");
     printf("  %s %s\n", __DATE__, __TIME__);
     printf("==============================================\n\n");
 
     if (!WaitModules()) {
-        printf("[-] Timeout\n");
+        printf("[-] Timeout waiting for modules\n");
         goto done;
     }
 
-    printf("[*] Extra wait 5 s ...\n");
+    printf("[*] Extra wait 5 s for initialization...\n");
     Sleep(5000);
 
     PrintModules();
 
     if (!SchemaInit()) {
-        printf("[-] SchemaSystem failed\n");
+        printf("\n[-] Schema init failed.\n");
+        printf("    This means the Schema System interface or\n");
+        printf("    vfunc layout has changed in this Dota 2 build.\n");
         goto done;
     }
 
@@ -79,12 +81,8 @@ static void MainThread(HMODULE hSelf) {
         if (GetModuleHandleA("server.dll"))
             d.DumpModule("server.dll");
 
-        if (GetModuleHandleA("engine2.dll"))
-            d.DumpModule("engine2.dll");
-
         if (d.ClassCount() == 0) {
-            printf("\n[-] Nothing found.\n");
-            printf("    Schema vfunc indices or binding layout may differ.\n");
+            printf("\n[-] No classes found.\n");
         } else {
             d.SaveHpp(std::string(OUT_DIR) + "\\offsets.hpp");
             d.SaveJson(std::string(OUT_DIR) + "\\offsets.json");
